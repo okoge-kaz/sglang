@@ -623,17 +623,30 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
     transfer_speed_gb_s: float = 0.0
     transfer_total_mb: float = 0.0
 
+    # Policy provenance. These fields are control metadata, not optional
+    # observability metrics, so they are serialized even when metrics are disabled.
+    first_prefill_weight_version: int = -1
+    min_forward_weight_version: int = -1
+    max_forward_weight_version: int = -1
+    last_forward_weight_version: int = -1
+
     def __getstate__(self) -> object:
         # send to detokenizer/tokenizer
-        if not self.enable_metrics:
-            return {}
-
         state = {
-            "wait_queue_entry_time": self.wait_queue_entry_time,
-            "forward_entry_time": self.forward_entry_time,
-            "prefill_finished_time": self.prefill_finished_time,
-            "diff_realtime_monotonic": global_diff_realtime_monotonic,
+            "first_prefill_weight_version": self.first_prefill_weight_version,
+            "min_forward_weight_version": self.min_forward_weight_version,
+            "max_forward_weight_version": self.max_forward_weight_version,
+            "last_forward_weight_version": self.last_forward_weight_version,
         }
+        if self.enable_metrics:
+            state.update(
+                {
+                    "wait_queue_entry_time": self.wait_queue_entry_time,
+                    "forward_entry_time": self.forward_entry_time,
+                    "prefill_finished_time": self.prefill_finished_time,
+                    "diff_realtime_monotonic": global_diff_realtime_monotonic,
+                }
+            )
         return state
 
     def set_scheduler_recv_time(self, ts=None):
@@ -1160,6 +1173,14 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
             }
         )
         return meta_data
+
+    def convert_to_policy_version_meta_info(self):
+        return {
+            "first_prefill_weight_version": self.first_prefill_weight_version,
+            "min_forward_weight_version": self.min_forward_weight_version,
+            "max_forward_weight_version": self.max_forward_weight_version,
+            "last_forward_weight_version": self.last_forward_weight_version,
+        }
 
     def format_duration(self, duration: float) -> str:
         return f"{duration * 1e3:.2f}ms"

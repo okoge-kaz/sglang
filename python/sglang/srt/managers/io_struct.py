@@ -1783,6 +1783,9 @@ class BeginWeightUpdateReqInput(BaseReq, kw_only=True):
     selected runners so fresh weights can be loaded into them."""
 
     selector: Literal["target", "draft", "all"] = "all"
+    # Optional for backward compatibility with clients that do not track
+    # rollout-policy versions. Version-aware clients must provide an integer.
+    weight_version: Optional[str] = None
 
 
 class BeginWeightUpdateReqOutput(BaseReq, kw_only=True):

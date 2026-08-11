@@ -1980,12 +1980,16 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 "finish_reason": recv_obj.finished_reasons[i],
                 "prompt_tokens": recv_obj.prompt_tokens[i],
                 "weight_version": self.server_args.weight_version,
+                "response_weight_version": self.server_args.weight_version,
                 "num_retractions": recv_obj.retraction_counts[i],
             }
 
-            if self.enable_metrics:
-                if recv_obj.time_stats is not None:
-                    scheduler_time_stats = recv_obj.time_stats[i]
+            if recv_obj.time_stats is not None:
+                scheduler_time_stats = recv_obj.time_stats[i]
+                meta_info.update(
+                    scheduler_time_stats.convert_to_policy_version_meta_info()
+                )
+                if self.enable_metrics:
                     meta_info.update(scheduler_time_stats.convert_to_output_meta_info())
 
             if getattr(state.obj, "return_logprob", False):

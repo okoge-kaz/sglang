@@ -96,9 +96,65 @@ class SchedulerWeightUpdaterManager:
     stashed_model_static_state: Any = None
     _weight_update_in_progress: bool = False
     _weight_update_loaded: bool = False
+    _weight_update_failed: bool = False
+    _weight_update_failure_message: str = ""
     # Runner selector for the open session, recorded at begin_weight_update and
     # reused by end_weight_update so the same set is restored and finalized.
     _weight_update_selector: str = "all"
+
+    def _set_pending_weight_version(self, raw_version: Optional[str]) -> Tuple[bool, str]:
+        if self.scheduler is None or raw_version is None:
+            return True, "Success"
+        try:
+            version = int(raw_version)
+        except (TypeError, ValueError):
+            return False, f"weight_version must be an integer, got {raw_version!r}"
+        if version <= self.scheduler.applied_weight_version:
+            return False, (
+                f"weight_version must advance monotonically: applied="
+                f"{self.scheduler.applied_weight_version}, requested={version}"
+            )
+        self.scheduler.pending_weight_version = version
+        return True, "Success"
+
+    def _validate_bucket_weight_version(self, raw_version: Optional[str]) -> Tuple[bool, str]:
+        if self.scheduler is None or self.scheduler.pending_weight_version is None:
+            return True, "Success"
+        try:
+            version = int(raw_version)
+        except (TypeError, ValueError):
+            return False, (
+                "versioned weight-update session requires an integer weight_version "
+                f"on every bucket, got {raw_version!r}"
+            )
+        if version != self.scheduler.pending_weight_version:
+            return False, (
+                f"weight_version mismatch: pending={self.scheduler.pending_weight_version}, "
+                f"bucket={version}"
+            )
+        return True, "Success"
+
+    def _fail_weight_update(self, message: str) -> None:
+        self._weight_update_failed = True
+        self._weight_update_failure_message = message
+        if self.scheduler is not None:
+            self.scheduler.pending_weight_version = None
+
+    def _merge_rank_results(self, success: bool, message: str) -> Tuple[bool, str]:
+        if not torch.distributed.is_initialized():
+            return success, message
+        try:
+            world_size = torch.distributed.get_world_size(group=self.tp_cpu_group)
+            results = [None] * world_size
+            torch.distributed.all_gather_object(
+                results, (success, message), group=self.tp_cpu_group
+            )
+        except Exception:
+            return False, traceback.format_exc()
+        failures = [rank_message for rank_success, rank_message in results if not rank_success]
+        if failures:
+            return False, "; ".join(failures)
+        return True, message
 
     @contextmanager
     def _observe_weight_load(self, source: str) -> Iterator[None]:
@@ -219,6 +275,12 @@ class SchedulerWeightUpdaterManager:
         assert (
             self._weight_update_in_progress
         ), "update_weights_from_distributed requires an open begin_weight_update session"
+        success, message = self._validate_bucket_weight_version(recv_req.weight_version)
+        if not success:
+            self._fail_weight_update(message)
+            return UpdateWeightsFromDistributedReqOutput(
+                success=False, message=message
+            )
         with self._observe_weight_load("distributed"):
             # Only the target (main) model joined this process's update group, so it
             # receives the broadcast once; the received weights are then loaded into
@@ -243,7 +305,12 @@ class SchedulerWeightUpdaterManager:
                 logger.error(message)
             if success:
                 self._weight_update_loaded = True
-                self.flush_cache_after_weight_update(recv_req)
+                try:
+                    self.flush_cache_after_weight_update(recv_req)
+                except Exception:
+                    success, message = False, traceback.format_exc()
+            if not success:
+                self._fail_weight_update(message)
             return UpdateWeightsFromDistributedReqOutput(
                 success=success, message=message
             )
@@ -254,25 +321,34 @@ class SchedulerWeightUpdaterManager:
         assert (
             self._weight_update_in_progress
         ), "update_weights_from_tensor requires an open begin_weight_update session"
+        success, message = self._validate_bucket_weight_version(recv_req.weight_version)
+        if not success:
+            self._fail_weight_update(message)
+            return UpdateWeightsFromTensorReqOutput(success=False, message=message)
         with self._observe_weight_load("tensor"):
-            monkey_patch_torch_reductions()
-            named_tensors = MultiprocessingSerializer.deserialize(
-                recv_req.serialized_named_tensors[self.tp_worker.ps.tp_rank]
-            )
-            success, message = True, "Success"
-            for _, runner in self.get_model_runners(recv_req.selector):
-                success, message = runner.weight_updater.update_weights_from_tensor(
-                    named_tensors=named_tensors,
-                    load_format=recv_req.load_format,
+            try:
+                monkey_patch_torch_reductions()
+                named_tensors = MultiprocessingSerializer.deserialize(
+                    recv_req.serialized_named_tensors[self.tp_worker.ps.tp_rank]
                 )
-                if not success:
-                    break
+                success, message = True, "Success"
+                for _, runner in self.get_model_runners(recv_req.selector):
+                    success, message = runner.weight_updater.update_weights_from_tensor(
+                        named_tensors=named_tensors,
+                        load_format=recv_req.load_format,
+                    )
+                    if not success:
+                        break
+                if success:
+                    self.flush_cache_after_weight_update(recv_req)
+            except Exception:
+                success, message = False, traceback.format_exc()
+            success, message = self._merge_rank_results(success, message)
             if success:
                 self._weight_update_loaded = True
-            if success:
-                self.flush_cache_after_weight_update(recv_req)
             else:
                 logger.error(message)
+                self._fail_weight_update(message)
             torch.distributed.barrier(group=self.tp_cpu_group)
             return UpdateWeightsFromTensorReqOutput(success=success, message=message)
 
@@ -302,13 +378,31 @@ class SchedulerWeightUpdaterManager:
         assert (
             not self._weight_update_in_progress
         ), "begin_weight_update called while a weight-update session is already open"
+        self._weight_update_failed = False
+        self._weight_update_failure_message = ""
+        success, message = self._set_pending_weight_version(recv_req.weight_version)
+        if not success:
+            self._fail_weight_update(message)
+            return BeginWeightUpdateReqOutput(success=False, message=message)
         self._weight_update_selector = recv_req.selector
-        for _, runner in self.get_model_runners(recv_req.selector):
-            runner.begin_weight_update()
+        try:
+            for _, runner in self.get_model_runners(recv_req.selector):
+                runner.begin_weight_update()
+            success, message = True, "Success"
+        except Exception:
+            success, message = False, traceback.format_exc()
+        success, message = self._merge_rank_results(success, message)
+        if success:
+            try:
+                torch.distributed.barrier(group=self.tp_cpu_group)
+            except Exception:
+                success, message = False, traceback.format_exc()
+        if not success:
+            self._fail_weight_update(message)
+            return BeginWeightUpdateReqOutput(success=False, message=message)
         self._weight_update_in_progress = True
         self._weight_update_loaded = False
-        torch.distributed.barrier(group=self.tp_cpu_group)
-        return BeginWeightUpdateReqOutput(success=True, message="Success")
+        return BeginWeightUpdateReqOutput(success=True, message=message)
 
     def end_weight_update(self, recv_req: EndWeightUpdateReqInput):
         """End the weight-update session on the runners begin_weight_update opened
@@ -317,12 +411,32 @@ class SchedulerWeightUpdaterManager:
         assert (
             self._weight_update_in_progress
         ), "end_weight_update called without begin_weight_update"
+        if self._weight_update_failed:
+            return EndWeightUpdateReqOutput(
+                success=False, message=self._weight_update_failure_message
+            )
         run_post_load = not self._weight_update_loaded
-        for _, runner in self.get_model_runners(self._weight_update_selector):
-            runner.end_weight_update(run_post_load=run_post_load)
+        try:
+            for _, runner in self.get_model_runners(self._weight_update_selector):
+                runner.end_weight_update(run_post_load=run_post_load)
+            success, message = True, "Success"
+        except Exception:
+            success, message = False, traceback.format_exc()
+        success, message = self._merge_rank_results(success, message)
+        if success:
+            try:
+                torch.distributed.barrier(group=self.tp_cpu_group)
+            except Exception:
+                success, message = False, traceback.format_exc()
         self._weight_update_in_progress = False
-        torch.distributed.barrier(group=self.tp_cpu_group)
-        return EndWeightUpdateReqOutput(success=True, message="Success")
+        if not success:
+            self._fail_weight_update(message)
+            return EndWeightUpdateReqOutput(success=False, message=message)
+
+        if self.scheduler is not None and self.scheduler.pending_weight_version is not None:
+            self.scheduler.applied_weight_version = self.scheduler.pending_weight_version
+            self.scheduler.pending_weight_version = None
+        return EndWeightUpdateReqOutput(success=True, message=message)
 
     def release_memory_occupation(self, recv_req: ReleaseMemoryOccupationReqInput):
         scheduler = self.scheduler

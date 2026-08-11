@@ -335,6 +335,16 @@ class Scheduler(
 
         # Parse args
         self.server_args = server_args
+        try:
+            self.applied_weight_version = int(server_args.weight_version)
+        except (TypeError, ValueError):
+            self.applied_weight_version = 0
+            if server_args.weight_version != "default":
+                logger.warning(
+                    "Non-numeric initial weight version %r; using 0 for scheduler provenance",
+                    server_args.weight_version,
+                )
+        self.pending_weight_version: Optional[int] = None
         self.nccl_port = port_args.nccl_port
         self.schedule_policy = server_args.schedule_policy
         self.enable_priority_scheduling = server_args.enable_priority_scheduling
@@ -3339,6 +3349,7 @@ class Scheduler(
 
         # Run forward
         if self.is_generation:
+            self.stamp_forward_weight_version(batch)
             if self.enable_overlap:
                 # Self-gates on batch.spec_info.future_indices; non-spec_v2
                 # no-ops (ForwardBatch.init_new lazily computes the sum).
@@ -3512,6 +3523,28 @@ class Scheduler(
         self._maybe_report_active_ranks()
 
         return ret
+
+    def stamp_forward_weight_version(self, batch: ScheduleBatch) -> None:
+        """Record the scheduler-authoritative weight version for this forward."""
+        version = self.applied_weight_version
+        is_prefill = batch.forward_mode.is_extend()
+
+        for req in batch.reqs:
+            stats = req.time_stats
+            if is_prefill and stats.first_prefill_weight_version < 0:
+                stats.first_prefill_weight_version = version
+
+            if stats.min_forward_weight_version < 0:
+                stats.min_forward_weight_version = version
+                stats.max_forward_weight_version = version
+            else:
+                stats.min_forward_weight_version = min(
+                    stats.min_forward_weight_version, version
+                )
+                stats.max_forward_weight_version = max(
+                    stats.max_forward_weight_version, version
+                )
+            stats.last_forward_weight_version = version
 
     def _maybe_report_active_ranks(self) -> None:
         if not (
