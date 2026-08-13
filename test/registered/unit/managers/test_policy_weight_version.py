@@ -84,6 +84,72 @@ def test_forward_stamp_tracks_prefill_and_mixed_versions():
     assert stats.last_forward_weight_version == 11
 
 
+def test_response_weight_version_segments_merge_and_clip_to_completion():
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.applied_weight_version = 10
+    scheduler.server_args = SimpleNamespace(
+        enable_response_weight_version_segments=True
+    )
+    req = SimpleNamespace(time_stats=SchedulerReqTimeStats(), output_ids=[])
+    batch = SimpleNamespace(
+        forward_mode=SimpleNamespace(is_extend=lambda: True),
+        reqs=[req],
+    )
+
+    scheduler.stamp_forward_weight_version(batch)
+    response_start = len(req.output_ids)
+    req.output_ids.append(1)
+    req.time_stats.record_response_weight_version_segment(
+        response_start=response_start,
+        response_end=len(req.output_ids),
+        weight_version=batch.forward_weight_version,
+    )
+    scheduler.stamp_forward_weight_version(batch)
+    response_start = len(req.output_ids)
+    req.output_ids.extend([2, 3])
+    req.time_stats.record_response_weight_version_segment(
+        response_start=response_start,
+        response_end=len(req.output_ids),
+        weight_version=batch.forward_weight_version,
+    )
+    scheduler.applied_weight_version = 11
+    batch.forward_mode = SimpleNamespace(is_extend=lambda: False)
+    scheduler.stamp_forward_weight_version(batch)
+    response_start = len(req.output_ids)
+    req.output_ids.extend([4, 5])
+    req.time_stats.record_response_weight_version_segment(
+        response_start=response_start,
+        response_end=len(req.output_ids),
+        weight_version=batch.forward_weight_version,
+    )
+
+    assert req.time_stats.response_weight_version_segments == [
+        [0, 3, 10],
+        [3, 5, 11],
+    ]
+    assert req.time_stats.convert_to_policy_version_meta_info(4)[
+        "response_weight_version_segments"
+    ] == [[0, 3, 10], [3, 4, 11]]
+
+
+def test_response_weight_version_segments_are_absent_when_disabled():
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.applied_weight_version = 10
+    scheduler.server_args = SimpleNamespace(
+        enable_response_weight_version_segments=False
+    )
+    stats = SchedulerReqTimeStats()
+    batch = SimpleNamespace(
+        forward_mode=SimpleNamespace(is_extend=lambda: True),
+        reqs=[SimpleNamespace(time_stats=stats, output_ids=[])],
+    )
+
+    scheduler.stamp_forward_weight_version(batch)
+
+    assert stats.response_weight_version_segments is None
+    assert "response_weight_version_segments" not in stats.__getstate__()
+
+
 def test_policy_version_stats_serialize_when_metrics_are_disabled():
     stats = SchedulerReqTimeStats(
         first_prefill_weight_version=10,

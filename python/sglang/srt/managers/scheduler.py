@@ -3528,6 +3528,13 @@ class Scheduler(
         """Record the scheduler-authoritative weight version for this forward."""
         version = self.applied_weight_version
         is_prefill = batch.forward_mode.is_extend()
+        track_response_weight_versions = getattr(
+            getattr(self, "server_args", None),
+            "enable_response_weight_version_segments",
+            False,
+        )
+        if track_response_weight_versions:
+            batch.forward_weight_version = version
 
         for req in batch.reqs:
             stats = req.time_stats

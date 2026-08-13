@@ -1987,7 +1987,9 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             if recv_obj.time_stats is not None:
                 scheduler_time_stats = recv_obj.time_stats[i]
                 meta_info.update(
-                    scheduler_time_stats.convert_to_policy_version_meta_info()
+                    scheduler_time_stats.convert_to_policy_version_meta_info(
+                        recv_obj.completion_tokens[i]
+                    )
                 )
                 if self.enable_metrics:
                     meta_info.update(scheduler_time_stats.convert_to_output_meta_info())

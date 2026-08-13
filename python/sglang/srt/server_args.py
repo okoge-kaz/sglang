@@ -1133,6 +1133,10 @@ class ServerArgs:
         str,
         "Version identifier for the model weights. Defaults to 'default' if not specified.",
     ] = "default"
+    enable_response_weight_version_segments: A[
+        bool,
+        "Return compact [start, end, weight_version] segments for generated response tokens.",
+    ] = False
     chat_template: A[
         Optional[str],
         "The buliltin chat template name or the path of the chat template file. This is only used for OpenAI-compatible API server.",

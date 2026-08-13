@@ -216,6 +216,11 @@ class SchedulerBatchResultProcessor:
 
             # Check finish conditions
             logprob_pt = 0
+            track_response_weight_versions = getattr(
+                self.server_args,
+                "enable_response_weight_version_segments",
+                False,
+            )
 
             for i, (req, next_token_id) in enumerate(zip(batch.reqs, next_token_ids)):
                 if (
@@ -230,7 +235,14 @@ class SchedulerBatchResultProcessor:
                     req.time_stats.set_prefill_finished_time()
 
                     # req output_ids are set here
+                    response_start = len(req.output_ids)
                     req.output_ids.append(next_token_id)
+                    if track_response_weight_versions:
+                        req.time_stats.record_response_weight_version_segment(
+                            response_start=response_start,
+                            response_end=len(req.output_ids),
+                            weight_version=batch.forward_weight_version,
+                        )
 
                     self._maybe_update_reasoning_tokens(req, next_token_id)
 
@@ -689,6 +701,11 @@ class SchedulerBatchResultProcessor:
             )
 
         self.token_to_kv_pool_allocator.free_group_begin()
+        track_response_weight_versions = getattr(
+            self.server_args,
+            "enable_response_weight_version_segments",
+            False,
+        )
 
         for i, req in enumerate(batch.reqs):
             req: Req
@@ -705,8 +722,15 @@ class SchedulerBatchResultProcessor:
             next_token_id = next_token_ids[i]
             is_spec = not batch.spec_algorithm.is_none()
 
+            response_start = len(req.output_ids)
             req.output_ids.extend(next_token_id)
             new_accept_len = len(next_token_id)
+            if track_response_weight_versions:
+                req.time_stats.record_response_weight_version_segment(
+                    response_start=response_start,
+                    response_end=len(req.output_ids),
+                    weight_version=batch.forward_weight_version,
+                )
 
             self._maybe_update_reasoning_tokens(req, next_token_id)
             req.time_stats.set_last_decode_finish_time()
