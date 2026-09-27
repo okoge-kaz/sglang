@@ -355,7 +355,14 @@ class SchedulerBatchResultProcessor:
                         )
                     else:
                         # req output_ids are set here
+                        response_start = len(req.output_ids)
                         req.output_ids.append(next_token_id)
+                        if batch.forward_weight_version >= 0:
+                            req.time_stats.record_response_weight_version_segment(
+                                response_start=response_start,
+                                response_end=len(req.output_ids),
+                                weight_version=batch.forward_weight_version,
+                            )
 
                         self._maybe_update_reasoning_tokens(req, next_token_id)
 
@@ -1011,8 +1018,15 @@ class SchedulerBatchResultProcessor:
                 req.to_finish = sampling_mask_finish_reason
                 new_accept_len = 0
             else:
+                response_start = len(req.output_ids)
                 req.output_ids.extend(next_token_id)
                 new_accept_len = len(next_token_id)
+                if batch.forward_weight_version >= 0 and new_accept_len:
+                    req.time_stats.record_response_weight_version_segment(
+                        response_start=response_start,
+                        response_end=len(req.output_ids),
+                        weight_version=batch.forward_weight_version,
+                    )
                 self._maybe_update_reasoning_tokens(req, next_token_id)
             req.update_finish_state(new_accept_len)
 

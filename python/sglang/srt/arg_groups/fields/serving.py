@@ -168,6 +168,11 @@ class Serving(msgspec.Struct):
         str,
         "Version identifier for the model weights. Defaults to 'default' if not specified.",
     ] = "default"
+    enable_response_weight_version_segments: A[
+        bool,
+        "Return scheduler first-prefill/forward provenance and exact response-token version segments (dense non-speculative generation).",
+    ] = False
+
     chat_template: A[
         Optional[str],
         "The buliltin chat template name or the path of the chat template file. This is only used for OpenAI-compatible API server.",

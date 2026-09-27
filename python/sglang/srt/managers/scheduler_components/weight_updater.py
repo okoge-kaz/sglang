@@ -404,7 +404,7 @@ class SchedulerWeightUpdaterManager:
         self._weight_update_selector = recv_req.selector
         self._weight_update_sync_base = recv_req.sync_base
         self._lora_stash = {}
-        self._weight_update_pending_version = None
+        self._weight_update_pending_version = recv_req.weight_version
         if recv_req.sync_base:
             for _, runner in self.get_model_runners(recv_req.selector):
                 runner.begin_weight_update()

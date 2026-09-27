@@ -496,7 +496,7 @@ class TokenizerControlMixin:
         if success:
             self._weight_update_session_open = True
             self._weight_update_staged_session = staged
-            self._weight_update_pending_version = None
+            self._weight_update_pending_version = obj.weight_version
         return success, message
 
     async def end_weight_update(

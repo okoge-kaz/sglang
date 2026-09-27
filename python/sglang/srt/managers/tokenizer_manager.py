@@ -243,6 +243,7 @@ class ReqState:
     # For performance metrics
     time_stats: APIServerReqTimeStats
     last_completion_tokens: int = 1
+    policy_version_meta_info: Optional[Dict[str, Any]] = None
     ttft_observed: bool = False
 
     dispatched: bool = False
@@ -2460,9 +2461,19 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 "num_retractions": recv_obj.retraction_counts[i],
             }
 
-            if self.enable_metrics:
-                if recv_obj.time_stats is not None:
-                    scheduler_time_stats = recv_obj.time_stats[i]
+            if recv_obj.time_stats is not None:
+                scheduler_time_stats = recv_obj.time_stats[i]
+                if self.server_args.enable_response_weight_version_segments:
+                    state.policy_version_meta_info = (
+                        scheduler_time_stats.convert_to_policy_version_meta_info(
+                            recv_obj.completion_tokens[i]
+                        )
+                    )
+                    meta_info.update(state.policy_version_meta_info)
+                    meta_info["response_weight_version"] = self.config_value(
+                        "weight_version"
+                    )
+                if self.enable_metrics:
                     meta_info.update(scheduler_time_stats.convert_to_output_meta_info())
 
             if getattr(state.obj, "return_logprob", False):
@@ -3503,6 +3514,15 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
 
         output_ids = state.output_ids
         meta_info["completion_tokens"] = len(output_ids)
+        if state.policy_version_meta_info:
+            for key, value in state.policy_version_meta_info.items():
+                if key == "response_weight_version_segments":
+                    value = [
+                        [start, min(end, len(output_ids)), version]
+                        for start, end, version in value
+                        if start < len(output_ids)
+                    ]
+                meta_info[key] = value
         if is_stream and self.incremental_streaming_output:
             output_ids = [output_ids[-1]] if len(output_ids) > 0 else []
         out = {

@@ -648,18 +648,45 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
 
     has_timing_data: bool = False
 
+    # Scheduler policy provenance is independent of optional timing metrics.
+    first_prefill_weight_version: int = -1
+    min_forward_weight_version: int = -1
+    max_forward_weight_version: int = -1
+    last_forward_weight_version: int = -1
+    response_weight_version_segments: Optional[List[List[int]]] = None
+
+    def record_response_weight_version_segment(
+        self, *, response_start: int, response_end: int, weight_version: int
+    ) -> None:
+        if response_start < 0 or response_end <= response_start or weight_version < 0:
+            raise ValueError("Invalid response policy-version boundary")
+        if self.response_weight_version_segments is None:
+            self.response_weight_version_segments = []
+        segments = self.response_weight_version_segments
+        if (
+            segments
+            and segments[-1][1] == response_start
+            and segments[-1][2] == weight_version
+        ):
+            segments[-1][1] = response_end
+        else:
+            segments.append([response_start, response_end, weight_version])
+
     def __getstate__(self) -> object:
         # send to detokenizer/tokenizer
-        if not (self.enable_metrics or self.has_timing_data):
-            return {}
-
-        state = {
-            "has_timing_data": True,
-            "wait_queue_entry_time": self.wait_queue_entry_time,
-            "forward_entry_time": self.forward_entry_time,
-            "prefill_finished_time": self.prefill_finished_time,
-            "diff_realtime_monotonic": global_diff_realtime_monotonic,
-        }
+        state = {}
+        if self.first_prefill_weight_version >= 0:
+            state.update(self.convert_to_policy_version_meta_info())
+        if self.enable_metrics or self.has_timing_data:
+            state.update(
+                {
+                    "has_timing_data": True,
+                    "wait_queue_entry_time": self.wait_queue_entry_time,
+                    "forward_entry_time": self.forward_entry_time,
+                    "prefill_finished_time": self.prefill_finished_time,
+                    "diff_realtime_monotonic": global_diff_realtime_monotonic,
+                }
+            )
         return state
 
     def set_scheduler_recv_time(self, ts=None):
@@ -1190,6 +1217,26 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
             }
         )
         return meta_data
+
+    def convert_to_policy_version_meta_info(
+        self, completion_tokens: Optional[int] = None
+    ):
+        meta_info = {
+            "first_prefill_weight_version": self.first_prefill_weight_version,
+            "min_forward_weight_version": self.min_forward_weight_version,
+            "max_forward_weight_version": self.max_forward_weight_version,
+            "last_forward_weight_version": self.last_forward_weight_version,
+        }
+        if self.response_weight_version_segments is not None:
+            response_end = (
+                completion_tokens if completion_tokens is not None else 1 << 63
+            )
+            meta_info["response_weight_version_segments"] = [
+                [start, min(end, response_end), version]
+                for start, end, version in self.response_weight_version_segments
+                if start < response_end and min(end, response_end) > start
+            ]
+        return meta_info
 
     def format_duration(self, duration: float) -> str:
         return f"{duration * 1e3:.2f}ms"

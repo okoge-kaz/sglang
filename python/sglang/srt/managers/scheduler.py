@@ -4297,6 +4297,8 @@ class Scheduler(
 
         # Run forward
         if self.is_generation:
+            if self.server_args.enable_response_weight_version_segments:
+                self.stamp_forward_weight_version(batch)
             if self.enable_overlap:
                 # Self-gates on batch.spec_info.future_indices; non-spec_v2
                 # no-ops (ForwardBatch.init_new lazily computes the sum).
@@ -5199,6 +5201,40 @@ class Scheduler(
 
         barrier(group=self.tp_group.cpu_group)
         return RpcReqOutput(success=success, message="" if not exec else str(exec))
+
+    def stamp_forward_weight_version(self, batch: ScheduleBatch) -> None:
+        """Stamp actual forwards from the scheduler's committed serving version."""
+        raw_version = get_serving().weight_version
+        version = 0 if raw_version == "default" else int(raw_version)
+        if version < 0:
+            raise ValueError("Policy provenance requires a non-negative weight version")
+        if not batch.spec_algorithm.is_none():
+            raise NotImplementedError(
+                "Policy provenance is qualified for non-speculative generation only"
+            )
+        batch.forward_weight_version = version
+        for req in batch.reqs:
+            if req.beam_group is not None:
+                raise NotImplementedError(
+                    "Policy provenance does not support beam search"
+                )
+            stats = req.time_stats
+            if (
+                batch.forward_mode.is_extend()
+                and stats.first_prefill_weight_version < 0
+            ):
+                stats.first_prefill_weight_version = version
+            if stats.min_forward_weight_version < 0:
+                stats.min_forward_weight_version = version
+                stats.max_forward_weight_version = version
+            else:
+                stats.min_forward_weight_version = min(
+                    stats.min_forward_weight_version, version
+                )
+                stats.max_forward_weight_version = max(
+                    stats.max_forward_weight_version, version
+                )
+            stats.last_forward_weight_version = version
 
     def handle_update_weight_version(
         self, recv_req: UpdateWeightVersionReqInput

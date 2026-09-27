@@ -2056,6 +2056,7 @@ class BeginWeightUpdateReqInput(BaseReq, kw_only=True):
     # sync), so the quant unpack/repack round-trip is skipped and a base-named
     # tensor arriving in-session is an error.
     sync_base: bool = True
+    weight_version: Optional[str] = None
 
 
 class BeginWeightUpdateReqOutput(BaseReq, kw_only=True):
